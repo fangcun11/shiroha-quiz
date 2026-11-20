@@ -2,7 +2,8 @@
 #
 # 触发：
 #   - push 到 main / Pull Request / 手动 Run workflow：产物上传为 Actions artifacts
-#   - 推送 v* 标签：额外创建或更新 GitHub Release，附上 Web ZIP 与 APK
+#   - push 到 main 且版本 tag 不存在：自动创建 Release（v<原生版本>-native），附上 Web ZIP 与 APK
+#   - 推送 v* 标签：额外创建或更新 GitHub Release
 #
 # 正式签名（可选，仓库 Settings → Secrets and variables → Actions）：
 #   ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD
@@ -162,7 +163,7 @@ jobs:
           retention-days: 30
 
   release:
-    name: Publish GitHub Release
+    name: Publish GitHub Release (tag)
     needs: [web, android]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -186,4 +187,55 @@ jobs:
             dist/*.apk
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+          fail_on_unmatched_files: true
+
+  release-main:
+    name: Publish Release (main, version bump)
+    needs: [web, android]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read native version
+        id: version
+        run: |
+          echo "native=$(python3 .github/scripts/android-version.py apps/android/app/build.gradle.kts native)" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether version tag exists
+        id: tag
+        run: |
+          TAG="v${{ steps.version.outputs.native }}-native"
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${TAG} 已存在，跳过自动发布"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::将创建 ${TAG} 并发布本次构建产物"
+          fi
+
+      - name: Download all artifacts
+        if: steps.tag.outputs.exists == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show artifacts
+        if: steps.tag.outputs.exists == 'false'
+        run: ls -lh dist
+
+      - name: Create Release
+        if: steps.tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.native }}-native
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            dist/*.zip
+            dist/*.apk
           fail_on_unmatched_files: true
